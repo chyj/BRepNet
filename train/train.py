@@ -95,3 +95,5 @@ if __name__ == '__main__':
     parser = BRepNet.add_model_specific_args(parser)
     opts = parser.parse_args()
     do_training(opts)
+
+    

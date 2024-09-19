@@ -1,4 +1,6 @@
 from collections import OrderedDict
+import os
+import h5py
 import numpy as np
 from pathlib import Path
 from pytorch_lightning.core.lightning import LightningModule
@@ -13,7 +15,7 @@ from dataloaders.max_num_faces_sampler import MaxNumFacesSampler
 from models.uvnet_encoders import UVNetCurveEncoder, UVNetSurfaceEncoder
 
 
-def build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc):
+def build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc, Cl, fs):
     """
     Build the matrix Psi.
 
@@ -59,6 +61,17 @@ def build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc):
 
     # Now we can concatentate these tensors to form Psi 
     Psi = torch.cat([Pt, Pe, Pc], dim=1)
+
+    # predict 时候存储，此时的batch_size为1
+    indices = np.insert(np.cumsum(Cl), 0, 0)
+    for i in range(Cl.size):
+        start_idx = indices[i]
+        end_idx = indices[i + 1]
+        sub_array = Psi[start_idx:end_idx]
+        save_path = os.path.join("E:/CAD_Dataset/Cad2seq/test/brepnet", '2s-psi-{}'.format(sub_array.shape[1]), '{}.h5'.format(fs[i]))
+        with h5py.File(save_path, 'w') as fp:
+            fp.create_dataset('out_vec', data=sub_array)
+            print(fs[i], "build_matrix_Psi Psi len", sub_array.shape)
 
     return Psi
 
@@ -219,7 +232,7 @@ class BRepNetLayer(LightningModule):
     This can be either the input layer or one of the hidden layers.
     """
 
-    def __init__(self, num_mlp_layers, input_size, output_size, dropout=None):
+    def __init__(self, num_mlp_layers, input_size, output_size, layers, dropout=None):
         """
         Initialization of a general BRepNet layer.
 
@@ -244,9 +257,10 @@ class BRepNetLayer(LightningModule):
         # one for coedges.  Hence the output of the MLP should always be 3 times
         # the final output size.
         self.mlp = BRepNetMLP(num_mlp_layers, input_size, 3*output_size, 3*output_size, final_layer, dropout)
+        self.layers = layers
         
 
-    def forward(self, Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf):
+    def forward(self, Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf, Cl, fs):
         """
         This layer performs the following steps
 
@@ -267,10 +281,21 @@ class BRepNetLayer(LightningModule):
 
         # We use the kernel index matrices to construct a matrix Psi with
         # size [ num_coedges x mlp_input_size]
-        Psi = build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc)
+        Psi = build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc, Cl, fs)
 
         # Next the mlp is applied to Psi
         Z = self.mlp(Psi)
+
+        # predict 时候存储，此时的batch_size为1
+        indices = np.insert(np.cumsum(Cl), 0, 0)
+        for i in range(Cl.size):
+            start_idx = indices[i]
+            end_idx = indices[i + 1]
+            sub_array = Z[start_idx:end_idx]
+            save_path = os.path.join("E:/CAD_Dataset/Cad2seq/test/brepnet", '2s-mlp-z-{}'.format(self.layers), '{}.h5'.format(fs[i]))
+            with h5py.File(save_path, 'w') as fp:
+                fp.create_dataset('out_vec', data=sub_array)
+                print(fs[i], "BRepNetLayer Z len", sub_array.shape)
 
         # Now we need to split Z into 3 parts
         Zc = Z[:, : self.output_size]
@@ -324,7 +349,7 @@ class BRepNetFaceOutputLayer(LightningModule):
         self.mlp = BRepNetMLP(num_mlp_layers, input_size, output_size, output_size, final_layer, dropout)
 
 
-    def forward(self, Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf):
+    def forward(self, Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf, Cl, fs):
         """
         This layer performs the following steps
 
@@ -342,10 +367,20 @@ class BRepNetFaceOutputLayer(LightningModule):
         
         # We use the kernel index matrices to construct a matrix Psi with
         # size [ num_coedges x mlp_input_size]
-        Psi = build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc)
+        Psi = build_matrix_Psi(Xf, Xe, Xc, Kf, Ke, Kc, Cl, fs)
 
         # Next the mlp is applied to Psi
         Z = self.mlp(Psi)
+
+        indices = np.insert(np.cumsum(Cl), 0, 0)
+        for i in range(Cl.size):
+            start_idx = indices[i]
+            end_idx = indices[i + 1]
+            sub_array = Z[start_idx:end_idx]
+            save_path = os.path.join("E:/CAD_Dataset/Cad2seq/test/brepnet", '2s-mlp-z-outlay', '{}.h5'.format(fs[i]))
+            with h5py.File(save_path, 'w') as fp:
+                fp.create_dataset('out_vec', data=sub_array)
+                print(fs[i], "BRepNetFaceOutputLayer Z len", sub_array.shape)
 
         # Finally use max pooling to combine the coedge
         # activations in Z to build the logits for faces
@@ -443,11 +478,11 @@ class BRepNet(LightningModule):
             dropout=None
 
         # The first layer has a size based on in the number of input features
-        self.layers.append(BRepNetLayer(num_mlp_layers, mlp_input_size, num_filters, dropout))
+        self.layers.append(BRepNetLayer(num_mlp_layers, mlp_input_size, num_filters, 1, dropout))
 
         # The hidden layers has a size based on in the number of filters
         for l in range(2, opts.num_layers):
-            self.layers.append(BRepNetLayer(num_mlp_layers, mlp_hidden_size, num_filters, dropout))
+            self.layers.append(BRepNetLayer(num_mlp_layers, mlp_hidden_size, num_filters, l, dropout))
 
         # The output layer is similar, but it generates only the embeddings for the faces
         self.output_layer = BRepNetFaceOutputLayer(num_mlp_layers, mlp_hidden_size, num_filters, dropout) 
@@ -469,7 +504,7 @@ class BRepNet(LightningModule):
         parser.add_argument("--kernel", type=str, default="kernels/winged_edge.json", help="Which kernel to use")
         parser.add_argument("--dropout", default=0.3, type=float, help="If using dropout then this is the dropout probability")
         parser.add_argument("--segment_names", type=str, help="The segment names file from the dataset")
-        parser.add_argument("--num_layers", type=int, default=5, help="2 gives just the input and output layers")
+        parser.add_argument("--num_layers", type=int, default=2, help="2 gives just the input and output layers")
         parser.add_argument("--num_mlp_layers", type=int, default=2, help="Number of layers in the mlp.  Value > 0")
         parser.add_argument("--num_filters", type=int, default=84, help="Number of filters.  Hyper-parameter s in the paper.  Value > 0")
         parser.add_argument("--curve_embedding_size", type=int, default=64, help="Size of curve embedding from edge or coedge grids")
@@ -514,7 +549,7 @@ class BRepNet(LightningModule):
         return None
             
 
-    def create_face_embeddings(self, Xf, Gf, Xe, Ge, Xc, Gc, Kf, Ke, Kc, Ce, Cf, Csf):
+    def create_face_embeddings(self, Xf, Gf, Xe, Ge, Xc, Gc, Kf, Ke, Kc, Ce, Cf, Csf, Cl, fs):
         """
         This creates the embedding for each face.
         """
@@ -558,9 +593,9 @@ class BRepNet(LightningModule):
 
         # Now pass this information through the various layers
         for i, layer in enumerate(self.layers):
-            Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf = layer(Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf)
+            Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf = layer(Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf, Cl, fs)
 
-        return self.output_layer(Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf)
+        return self.output_layer(Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf, Cl, fs)
 
 
     def forward(self, Xf, Xe, Xc, Kf, Ke, Kc, Ce, Cf, Csf):
@@ -622,9 +657,11 @@ class BRepNet(LightningModule):
         Ce = batch["coedges_of_edges"]
         Cf = batch["coedges_of_small_faces"]
         Csf = batch["coedges_of_big_faces"]
+        Cl = batch["coedges_len"]
+        fs = batch["file_stems"]
 
         # Make the forward pass through the network
-        face_embeddings = self.create_face_embeddings(Xf, Gf, Xe, Ge, Xc, Gc, Kf, Ke, Kc, Ce, Cf, Csf)
+        face_embeddings = self.create_face_embeddings(Xf, Gf, Xe, Ge, Xc, Gc, Kf, Ke, Kc, Ce, Cf, Csf, Cl, fs)
 
         # The tensor logits is now size [ num_faces_in_batch x num_classes ]
         segmentation_scores = self.classification_layer(face_embeddings)

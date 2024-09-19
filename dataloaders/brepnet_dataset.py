@@ -844,6 +844,7 @@ def brepnet_collate_fn(data_list):
 
     Ce = []   # Coedge indices for coedges owned by each edge
     Csf = []  # Coedge indices for coedges owned by "big faces"
+    Cl = []
 
     # Keep track of which file each B-Rep came from
     file_stems = []
@@ -870,6 +871,7 @@ def brepnet_collate_fn(data_list):
         Xc.append(data["coedge_features"])
         Gc.append(data["coedge_point_grids"])
         lcs.append(data["coedge_lcs"])
+        Cl.append(num_coedges)
 
         # For edge and coedge indices things are easy.  We just need to 
         # add the offsets to the arrays
@@ -983,6 +985,7 @@ def brepnet_collate_fn(data_list):
         "coedges_of_edges": torch.cat(Ce),
         "coedges_of_small_faces": torch.cat(Cf),
         "coedges_of_big_faces": Csf,
+        "coedges_len": np.array(Cl),
         "labels": concatenate_tensor_arrays(labels_small_faces, labels_big_faces, unsqueeze=False),
         "split_batch": split_batch,
         "file_stems": file_stems
